@@ -294,6 +294,13 @@ ConstructInfo Thruster::GetConstructInfo()
     node.childNodes.insert({"input", childNode});
     node.childNodes.insert({"output", childNode});
 
+    // fluid_dynamics coefficient curves: advance ratio J -> kt / kq
+    childNode.attributes.clear();
+    childNode.attributes.insert({"advance_ratio", {ConstructInfoValueType::STRING, false}});
+    childNode.attributes.insert({"value", {ConstructInfoValueType::STRING, false}});
+    node.childNodes.insert({"thrust_curve", childNode});
+    node.childNodes.insert({"torque_curve", childNode});
+
     info.nodes.insert({"thrust_model", node});
 
     return info;
@@ -473,8 +480,19 @@ std::unique_ptr<Thruster> Thruster::Construct(std::string_view uniqueName, Const
             reverse = std::get<Scalar>(value.value);
         Scalar torqueCoeff = std::get<Scalar>(info.nodes.at("thrust_model").childNodes.at("torque_coeff").attributes.at("value").value);
         
-        thrustModel = std::make_unique<FDThrust>(forward, reverse, torqueCoeff, diameter, right, 
+        std::unique_ptr<FDThrust> fd = std::make_unique<FDThrust>(forward, reverse, torqueCoeff, diameter, right, 
             SimulationApp::GetApp()->GetSimulationManager()->GetOcean()->GetLiquid().density);
+        auto curve = [&info](const char* name) -> Curve
+        {
+            ConstructInfoNode& node = info.nodes.at("thrust_model").childNodes.at(name);
+            ConstructInfoValue& j = node.attributes.at("advance_ratio");
+            ConstructInfoValue& v = node.attributes.at("value");
+            if (!j.valid || !v.valid)
+                return Curve();
+            return Curve::Parse(std::get<std::string>(j.value), std::get<std::string>(v.value), Curve::Ends::EXTRAPOLATE);
+        };
+        fd->SetCoefficientCurves(curve("thrust_curve"), curve("torque_curve"));
+        thrustModel = std::move(fd);
     }
     else
     {
