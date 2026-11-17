@@ -26,6 +26,7 @@
 #pragma once
 
 #include "actuators/LinkActuator.h"
+#include "utils/Curve.h"
 
 namespace sf
 {
@@ -62,6 +63,15 @@ namespace sf
          */
         void SetSetpoint(Scalar s);
         
+        //! A method setting tabulated foil coefficients, replacing the quadratic approximation.
+        /*!
+         \param lift lift coefficient CL as a function of the angle of attack [rad], for angles >= 0
+                (mirrored for negative angles); stall is part of the curve. Empty keeps the approximation.
+         \param drag drag coefficient CD as a function of the angle of attack [rad], for angles >= 0
+                (mirrored for negative angles). Empty keeps the approximation.
+         */
+        void SetCoefficientCurves(Curve lift, Curve drag);
+
         //! A method returning the current setpoint.
         Scalar GetSetpoint() const;
 
@@ -84,6 +94,8 @@ namespace sf
         //Params
         Scalar dragCoeff_;
         Scalar liftCoeff_;
+        Curve liftCurve_;
+        Curve dragCurve_;
         Scalar area_;
         Scalar stallAngle_;
         Scalar maxAngle_;

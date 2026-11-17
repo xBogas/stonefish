@@ -72,7 +72,17 @@ Scalar Rudder::GetSetpoint() const
 
 Scalar Rudder::GetAngle() const
 {
-    return theta_;
+    // Same convention as the setpoint (undo the internal inversion)
+    return inv_ ? -theta_ : theta_;
+}
+
+void Rudder::SetCoefficientCurves(Curve lift, Curve drag)
+{
+    for (const Curve* c : {&lift, &drag})
+        if (!c->IsEmpty() && c->GetX().front() < Scalar(0))
+            throw std::runtime_error("Rudder: coefficient curves are defined for angles of attack >= 0!");
+    liftCurve_ = std::move(lift);
+    dragCurve_ = std::move(drag);
 }
 
 void Rudder::Update(Scalar dt)
@@ -136,6 +146,13 @@ void Rudder::Update(Scalar dt)
             // Equation 3.2.21
             Scalar drag = angle * du2 * X;
 
+            // Tabulated coefficients (symmetric foil) replace the approximation
+            Scalar q = .5 * area_ * rho * u*u;
+            if (!liftCurve_.IsEmpty())
+                lift = std::copysign(liftCurve_(btFabs(angle)), angle) * q;
+            if (!dragCurve_.IsEmpty())
+                drag = dragCurve_(btFabs(angle)) * q;
+
             // Drag is opposite to velocity
             dragV_ = -velocity;
             dragV_.normalize() *= drag;
@@ -145,8 +162,8 @@ void Rudder::Update(Scalar dt)
             liftV_ = Vector3(0., 0., -1.).cross(velocity);
             liftV_.normalize() *= lift;
 
-            // if angle greater than stall -> no lift
-            if (fabs(angle) > stallAngle_)
+            // if angle greater than stall -> no lift (a lift curve models stall itself)
+            if (liftCurve_.IsEmpty() && fabs(angle) > stallAngle_)
             {
                 liftV_ = Vector3(0, 0, 0);
             }
@@ -210,14 +227,22 @@ ConstructInfo Rudder::GetConstructInfo()
     
     // Specs
     node.optional = false;
-    node.attributes.insert({"drag_coeff", {ConstructInfoValueType::SCALAR, false}});
-    node.attributes.insert({"lift_coeff", {ConstructInfoValueType::SCALAR, false}});
+    node.attributes.insert({"drag_coeff", {ConstructInfoValueType::SCALAR, true}}); // required without drag_curve
+    node.attributes.insert({"lift_coeff", {ConstructInfoValueType::SCALAR, true}}); // required without lift_curve
     node.attributes.insert({"area", {ConstructInfoValueType::SCALAR, false}});
     node.attributes.insert({"max_angle", {ConstructInfoValueType::SCALAR, false}});
     node.attributes.insert({"stall_angle", {ConstructInfoValueType::SCALAR, true}});
     node.attributes.insert({"max_angular_rate", {ConstructInfoValueType::SCALAR, true}});
     node.attributes.insert({"inverted", {ConstructInfoValueType::BOOL, true}});
     info.nodes.insert({"specs", node});
+
+    // Coefficient curves (optional): angle of attack [rad] -> coefficient
+    node.attributes.clear();
+    node.optional = true;
+    node.attributes.insert({"angle", {ConstructInfoValueType::STRING, false}});
+    node.attributes.insert({"value", {ConstructInfoValueType::STRING, false}});
+    info.nodes.insert({"lift_curve", node});
+    info.nodes.insert({"drag_curve", node});
 
     // Visual
     node.attributes.clear();
@@ -245,9 +270,30 @@ ConstructInfo Rudder::GetConstructInfo()
 
 std::unique_ptr<Rudder> Rudder::Construct(std::string_view uniqueName, ConstructInfo& info)
 {
+    // Coefficients: a curve or the constant of the quadratic approximation
+    auto curve = [&info](const char* node) -> Curve
+    {
+        ConstructInfoValue& angle = info.nodes.at(node).attributes.at("angle");
+        ConstructInfoValue& value = info.nodes.at(node).attributes.at("value");
+        if (!angle.valid || !value.valid)
+            return Curve();
+        return Curve::Parse(std::get<std::string>(angle.value), std::get<std::string>(value.value));
+    };
+    auto coeff = [&info](const char* name, bool haveCurve) -> Scalar
+    {
+        ConstructInfoValue& value = info.nodes.at("specs").attributes.at(name);
+        if (value.valid)
+            return std::get<Scalar>(value.value);
+        if (!haveCurve)
+            throw std::runtime_error(std::string("Rudder: '") + name + "' or the matching curve is required!");
+        return Scalar(0);
+    };
+    Curve liftCurve = curve("lift_curve");
+    Curve dragCurve = curve("drag_curve");
+    Scalar liftCoeff = coeff("lift_coeff", !liftCurve.IsEmpty());
+    Scalar dragCoeff = coeff("drag_coeff", !dragCurve.IsEmpty());
+
     // Required
-    Scalar dragCoeff = std::get<Scalar>(info.nodes.at("specs").attributes.at("drag_coeff").value);
-    Scalar liftCoeff = std::get<Scalar>(info.nodes.at("specs").attributes.at("lift_coeff").value);
     Scalar area = std::get<Scalar>(info.nodes.at("specs").attributes.at("area").value);
     Scalar maxAngle = std::get<Scalar>(info.nodes.at("specs").attributes.at("max_angle").value);
 
@@ -282,7 +328,9 @@ std::unique_ptr<Rudder> Rudder::Construct(std::string_view uniqueName, Construct
     std::unique_ptr<Polyhedron> rudder = std::make_unique<Polyhedron>(std::string(uniqueName) + std::string("/Rudder"), phy, GetFullPath(std::string(meshFilename)), 
         meshScale, meshOrigin, materialName, lookName);
         
-    return std::make_unique<Rudder>(uniqueName, std::move(rudder), area, liftCoeff, dragCoeff, stallAngle, maxAngle, inverted, maxAngularRate);
+    std::unique_ptr<Rudder> actuator = std::make_unique<Rudder>(uniqueName, std::move(rudder), area, liftCoeff, dragCoeff, stallAngle, maxAngle, inverted, maxAngularRate);
+    actuator->SetCoefficientCurves(std::move(liftCurve), std::move(dragCurve));
+    return actuator;
 }
 
 REGISTER_ACTUATOR("rudder", Rudder)
